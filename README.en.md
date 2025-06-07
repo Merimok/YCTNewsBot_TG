@@ -14,10 +14,10 @@ AutoNews is a Telegram bot that automatically collects news from RSS feeds, gene
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - Dependencies:
   ```bash
-  pip install flask feedparser requests openai sqlite3
+  pip install flask feedparser requests openai
   ```
 - Environment Variables:
   - `TELEGRAM_TOKEN`: Your Telegram bot token.
