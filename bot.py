@@ -118,12 +118,23 @@ def webhook():
     elif command == '/sqliteupdate':
         if 'document' in message:
             file_id = message['document']['file_id']
-            info = requests.get(f"{tg.TELEGRAM_URL}getFile", params={'file_id': file_id}).json()
+            info_resp = requests.get(
+                f"{tg.TELEGRAM_URL}getFile", params={'file_id': file_id}
+            )
+            if info_resp.status_code != 200:
+                tg.send_message(chat_id, "Ошибка запроса getFile")
+                return "OK", 200
+            info = info_resp.json()
             file_path = info.get('result', {}).get('file_path')
             if file_path:
-                file_data = requests.get(f"https://api.telegram.org/file/bot{tg.TELEGRAM_TOKEN}/{file_path}")
+                file_resp = requests.get(
+                    f"https://api.telegram.org/file/bot{tg.TELEGRAM_TOKEN}/{file_path}"
+                )
+                if file_resp.status_code != 200:
+                    tg.send_message(chat_id, "Ошибка скачивания файла")
+                    return "OK", 200
                 with open(db.DB_FILE, 'wb') as f:
-                    f.write(file_data.content)
+                    f.write(file_resp.content)
                 tg.send_message(chat_id, "База обновлена")
             else:
                 tg.send_message(chat_id, "Не удалось получить файл")
