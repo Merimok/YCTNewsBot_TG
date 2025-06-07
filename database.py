@@ -7,7 +7,8 @@ from typing import List, Optional
 
 from telegram_api import send_message
 
-DB_FILE = "feedcache.db"
+# Ensure the database path is independent of the current working directory
+DB_FILE = os.path.join(os.path.dirname(__file__), "feedcache.db")
 
 logger = logging.getLogger(__name__)
 
