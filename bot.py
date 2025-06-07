@@ -1,6 +1,7 @@
 from flask import Flask, request
 import feedparser
 import requests
+from bs4 import BeautifulSoup
 import json
 import logging
 import os
@@ -78,9 +79,11 @@ def init_db():
         message TEXT,
         link TEXT
     )''')
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
               ("prompt", """
-Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в следующем формате:
+Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО этот текст статьи:
+{text}
+Напиши новость на русском в следующем формате:
 
 Заголовок в стиле новостного канала
 <один перенос строки>
@@ -203,7 +206,23 @@ def log_error(message, link):
             send_message(channel_id, f"Ошибка: {message}\nСсылка: {link}", use_html=False)
     conn.close()
 
-def get_article_content(url, max_attempts=3):
+def extract_article_text(url, limit=8000):
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error(f"Ошибка загрузки страницы: {e}")
+        log_error(f"Ошибка загрузки страницы: {e}", url)
+        return None
+    soup = BeautifulSoup(response.text, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.extract()
+    text = " ".join(t.get_text(separator=" ", strip=True) for t in soup.find_all(["p", "h1", "h2", "h3"]))
+    if not text:
+        text = soup.get_text(separator=" ", strip=True)
+    return text.replace("\xa0", " ")[:limit]
+
+def get_article_content(url, max_attempts=3, text_limit=8000):
     global last_llm_response
     if not OPENAI_API_KEY:
         logger.error("OPENAI_API_KEY не задан")
@@ -211,7 +230,10 @@ def get_article_content(url, max_attempts=3):
         return "Ошибка: OPENAI_API_KEY не задан", "Ошибка: OPENAI_API_KEY не задан"
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-    prompt = get_prompt().format(url=url)
+    article_text = extract_article_text(url, limit=text_limit)
+    if not article_text:
+        return "Ошибка: не удалось загрузить статью", "Ошибка: не удалось загрузить статью"
+    prompt = get_prompt().format(text=article_text)
     model = get_model()
 
     for attempt in range(max_attempts):
