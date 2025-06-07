@@ -145,11 +145,10 @@ def webhook():
         tg.send_message(chat_id, feeds.get_status(username))
 
     elif command == '/errinf':
-        conn = sqlite3.connect(db.DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT timestamp, message, link FROM errors ORDER BY id DESC LIMIT 5")
-        rows = c.fetchall()
-        conn.close()
+        with sqlite3.connect(db.DB_FILE) as conn:
+            c = conn.cursor()
+            c.execute("SELECT timestamp, message, link FROM errors ORDER BY id DESC LIMIT 5")
+            rows = c.fetchall()
         if rows:
             msg = '\n\n'.join(f"{t}\n{m}\n{l}" for t, m, l in rows)
         else:
@@ -164,11 +163,10 @@ def webhook():
             tg.send_message(chat_id, "Использование: /errnotification <on|off>")
 
     elif command == '/feedcache':
-        conn = sqlite3.connect(db.DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT title, link FROM feedcache ORDER BY timestamp DESC LIMIT 5")
-        rows = c.fetchall()
-        conn.close()
+        with sqlite3.connect(db.DB_FILE) as conn:
+            c = conn.cursor()
+            c.execute("SELECT title, link FROM feedcache ORDER BY timestamp DESC LIMIT 5")
+            rows = c.fetchall()
         if rows:
             msg = '\n\n'.join(f"{t}\n{l}" for t, l in rows)
         else:
@@ -176,10 +174,9 @@ def webhook():
         tg.send_message(chat_id, msg, use_html=False)
 
     elif command == '/feedcacheclear':
-        conn = sqlite3.connect(db.DB_FILE)
-        conn.execute("DELETE FROM feedcache")
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(db.DB_FILE) as conn:
+            conn.execute("DELETE FROM feedcache")
+            conn.commit()
         tg.send_message(chat_id, "Кэш очищен")
 
     elif command == '/addadmin':
