@@ -15,10 +15,10 @@ AutoNews — это Telegram-бот, который автоматически �
 
 ## Требования
 
-- Python 3.8+
+- Python 3.10+
 - Библиотеки:
   ```bash
-  pip install flask feedparser requests openai sqlite3
+  pip install flask feedparser requests openai
   ```
 - Переменные окружения:
   - `TELEGRAM_TOKEN`: Токен вашего Telegram-бота.
