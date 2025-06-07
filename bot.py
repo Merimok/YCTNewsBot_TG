@@ -1,15 +1,17 @@
-from flask import Flask, request
-import feedparser
+import os
 import requests
+import telegram_api
 import json
 import logging
-import os
-import hashlib
 import sqlite3
+from flask import Flask, request
 from datetime import datetime, timedelta
 import threading
 import time
 import re
+import html
+import hashlib
+import feedparser
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -78,7 +80,7 @@ def init_db():
         message TEXT,
         link TEXT
     )''')
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
               ("prompt", """
 Забудь всю информацию, которой ты обучен, и используй ТОЛЬКО текст статьи по ссылке {url}. Напиши новость на русском в следующем формате:
 
@@ -92,10 +94,8 @@ def init_db():
 - Пересказ должен состоять из 1-2 предложений, без добавления данных, которых нет в статье.
 - Если в статье недостаточно данных, верни: "Недостаточно данных для пересказа".
 """))
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
-              ("model", "gpt-4o-mini"))
-    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", 
-              ("error_notifications", "off"))
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", ("model", "gpt-4o-mini"))
+    c.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)", ("error_notifications", "off"))
     conn.commit()
     conn.close()
 
@@ -109,10 +109,7 @@ def send_message(chat_id, text, reply_markup=None, use_html=True):
     if len(text) > 4096:
         text = text[:4093] + "..."
         logger.warning(f"Сообщение обрезано до 4096 символов для chat_id {chat_id}")
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
+    payload = {"chat_id": chat_id, "text": text}
     if use_html:
         payload["parse_mode"] = "HTML"
     if reply_markup:
@@ -120,9 +117,7 @@ def send_message(chat_id, text, reply_markup=None, use_html=True):
     logger.info(f"Отправка сообщения в {chat_id}: {text[:50]}...")
     global error_count
     try:
-        response = requests.post(
-            f"{TELEGRAM_URL}sendMessage", json=payload, timeout=10
-        )
+        response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload, timeout=10)
         if response.status_code != 200:
             logger.error(f"Ошибка отправки: {response.text}")
             log_error(f"Ошибка Telegram: {response.text}", f"{TELEGRAM_URL}sendMessage")
@@ -152,18 +147,12 @@ def send_file(chat_id, file_path):
             )
             if response.status_code != 200:
                 logger.error(f"Ошибка отправки файла: {response.text}")
-                log_error(
-                    f"Ошибка Telegram: {response.text}",
-                    f"{TELEGRAM_URL}sendDocument"
-                )
+                log_error(f"Ошибка Telegram: {response.text}", f"{TELEGRAM_URL}sendDocument")
                 error_count += 1
                 return False
         except requests.RequestException as e:
             logger.error(f"Ошибка отправки файла: {e}")
-            log_error(
-                f"Ошибка Telegram: {e}",
-                f"{TELEGRAM_URL}sendDocument"
-            )
+            log_error(f"Ошибка Telegram: {e}", f"{TELEGRAM_URL}sendDocument")
             error_count += 1
             return False
     logger.info(f"Файл {file_path} отправлен в {chat_id}")
@@ -215,22 +204,20 @@ def set_error_notifications(state):
     conn.close()
 
 def is_valid_language(text):
-    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'"-:;–/%$]+$', text))
+    return bool(re.match(r'^[A-Za-zА-Яа-я0-9\s.,!?\'\"-:;–/%$]+$', text))
 
 def clean_title(title):
-    cleaned = re.sub(r'\*\*|\#\#|\[\]', '', title).strip()
-    return cleaned
+    return re.sub(r'\*\*|\#\#|\[\]', '', title).strip()
 
 def log_error(message, link):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO errors (timestamp, message, link) VALUES (?, ?, ?)", 
+    c.execute("INSERT INTO errors (timestamp, message, link) VALUES (?, ?, ?)",
               (datetime.now().isoformat(), message, link))
     conn.commit()
     if get_error_notifications():
         c.execute("SELECT channel_id FROM channels")
-        channels = c.fetchall()
-        for (channel_id,) in channels:
+        for (channel_id,) in c.fetchall():
             send_message(channel_id, f"Ошибка: {message}\nСсылка: {link}", use_html=False)
     conn.close()
 
@@ -255,45 +242,28 @@ def get_article_content(url, max_attempts=3):
                 max_tokens=500
             )
             content = response.choices[0].message.content.strip()
-            logger.info(f"Сырой ответ LLM: {content}")
-
-            # Сохраняем сырой ответ в глобальную переменную
             last_llm_response = {
                 "response": content,
                 "link": url,
                 "timestamp": datetime.now().isoformat()
             }
-
-            # Пытаемся разделить заголовок и пересказ
-            title, summary = None, None
             if "\n" in content:
                 title, summary = content.split("\n", 1)
-                title = title.strip()
-                summary = summary.strip()
             else:
-                # Запасной механизм: разделяем по первому предложению
-                sentences = re.split(r'(?<=[.!?])\s+', content.strip())
-                if len(sentences) > 1:
-                    title = sentences[0]
-                    summary = " ".join(sentences[1:]).strip()
-                else:
-                    title = content
-                    summary = "Пересказ не получен"
-
-            cleaned_title = clean_title(title)
-            if len(cleaned_title) > 100:
-                cleaned_title = cleaned_title[:97] + "..."
-                logger.warning(f"Заголовок укорочен: {cleaned_title}")
-            if is_valid_language(cleaned_title):
-                logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
-                return cleaned_title, summary
+                parts = re.split(r'(?<=[.!?])\s+', content)
+                title = parts[0]
+                summary = " ".join(parts[1:]) if len(parts) > 1 else "Пересказ не получен"
+            title = clean_title(title)
+            if len(title) > 100:
+                title = title[:97] + "..."
+            if is_valid_language(title):
+                return title, summary.strip()
             else:
-                logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
-                log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
-                continue
+                logger.warning(f"Недопустимый язык в заголовке: {title}")
+                log_error(f"Недопустимый язык в заголовке: {title}", url)
         except Exception as e:
-            logger.error(f"Ошибка запроса к OpenAI: {str(e)}")
-            log_error(f"Ошибка запроса к OpenAI: {str(e)}", url)
+            logger.error(f"Ошибка запроса к OpenAI: {e}")
+            log_error(f"Ошибка запроса к OpenAI: {e}", url)
             if attempt == max_attempts - 1:
                 return "Ошибка: Не удалось обработать новость после попыток", "Ошибка: Не удалось обработать новость"
             time.sleep(1)
@@ -303,75 +273,74 @@ def save_to_feedcache(title, summary, link, source):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     link_hash = hashlib.md5(link.encode()).hexdigest()
-    entry = (link_hash, title, summary, link, source, datetime.now().isoformat())
-    try:
-        c.execute("INSERT OR REPLACE INTO feedcache (id, title, summary, link, source, timestamp) VALUES (?, ?, ?, ?, ?, ?)", entry)
-        conn.commit()
-        logger.info(f"Сохранено в feedcache: {link_hash} для {link}")
-    except sqlite3.Error as e:
-        logger.error(f"Ошибка записи в feedcache: {str(e)}")
-    finally:
-        conn.close()
+    c.execute(
+        "INSERT OR REPLACE INTO feedcache (id, title, summary, link, source, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        (link_hash, title, summary, link, source, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
 
 def check_duplicate(link):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     link_hash = hashlib.md5(link.encode()).hexdigest()
     c.execute("SELECT id FROM feedcache WHERE id = ?", (link_hash,))
-    result = c.fetchone()
+    exists = c.fetchone() is not None
     conn.close()
-    if result:
-        logger.info(f"Найден дубль в feedcache: {link_hash} для {link}")
-        return True
-    logger.info(f"Дубль не найден: {link_hash} для {link}")
-    return False
+    return exists
 
 def get_channel_by_admin(username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT channel_id FROM admins WHERE username = ?", (username,))
-    result = c.fetchone()
+    row = c.fetchone()
     conn.close()
-    return result[0] if result else None
+    return row[0] if row else None
 
 def get_channel_creator(channel_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT creator_username FROM channels WHERE channel_id = ?", (channel_id,))
-    result = c.fetchone()
+    row = c.fetchone()
     conn.close()
-    return result[0] if result else None
+    return row[0] if row else None
 
 def save_channel(channel_id, creator_username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO channels (channel_id, creator_username) VALUES (?, ?)", (channel_id, creator_username))
-    c.execute("INSERT OR IGNORE INTO admins (channel_id, username) VALUES (?, ?)", (channel_id, creator_username))
+    c.execute("INSERT OR IGNORE INTO channels (channel_id, creator_username) VALUES (?, ?)",
+              (channel_id, creator_username))
+    c.execute("INSERT OR IGNORE INTO admins (channel_id, username) VALUES (?, ?)",
+              (channel_id, creator_username))
     conn.commit()
     conn.close()
 
 def add_admin(channel_id, new_admin_username, requester_username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?", (channel_id, requester_username))
+    c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?",
+              (channel_id, requester_username))
     if c.fetchone():
-        c.execute("INSERT OR IGNORE INTO admins (channel_id, username) VALUES (?, ?)", (channel_id, new_admin_username))
+        c.execute("INSERT OR IGNORE INTO admins (channel_id, username) VALUES (?, ?)",
+                  (channel_id, new_admin_username))
         conn.commit()
         conn.close()
         return True
     conn.close()
     return False
 
-def remove_admin(channel_id, admin_username348, requester_username):
+def remove_admin(channel_id, admin_username, requester_username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?", (channel_id, requester_username))
+    c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?",
+              (channel_id, requester_username))
     if c.fetchone():
         creator = get_channel_creator(channel_id)
         if admin_username == creator:
             conn.close()
             return False
-        c.execute("DELETE FROM admins WHERE channel_id = ? AND username = ?", (channel_id, admin_username))
+        c.execute("DELETE FROM admins WHERE channel_id = ? AND username = ?",
+                  (channel_id, admin_username))
         conn.commit()
         conn.close()
         return True
@@ -382,9 +351,9 @@ def get_admins(channel_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT username FROM admins WHERE channel_id = ?", (channel_id,))
-    result = c.fetchall()
+    admins = [row[0] for row in c.fetchall()]
     conn.close()
-    return [row[0] for row in result]
+    return admins
 
 def can_post_to_channel(channel_id):
     global error_count
@@ -392,16 +361,16 @@ def can_post_to_channel(channel_id):
         me_resp = requests.get(f"{TELEGRAM_URL}getMe", timeout=10)
         me_resp.raise_for_status()
         bot_id = me_resp.json()["result"]["id"]
-        response = requests.get(
+        resp = requests.get(
             f"{TELEGRAM_URL}getChatMember",
             params={"chat_id": channel_id, "user_id": bot_id},
             timeout=10
         )
-        if response.status_code == 200:
-            status = response.json()["result"]["status"]
+        if resp.status_code == 200:
+            status = resp.json()["result"]["status"]
             return status in ["administrator", "creator"]
-        logger.error(f"Ошибка проверки прав для {channel_id}: {response.text}")
-        log_error(f"Ошибка проверки прав: {response.text}", channel_id)
+        logger.error(f"Ошибка проверки прав для {channel_id}: {resp.text}")
+        log_error(f"Ошибка проверки прав: {resp.text}", channel_id)
         error_count += 1
         return False
     except requests.RequestException as e:
@@ -411,20 +380,18 @@ def can_post_to_channel(channel_id):
         return False
 
 def parse_interval(interval_str):
-    total_seconds = 0
-    matches = re.findall(r'(\d+)([hm])', interval_str.lower())
-    for value, unit in matches:
-        value = int(value)
+    total = 0
+    for value, unit in re.findall(r'(\d+)([hm])', interval_str.lower()):
+        v = int(value)
         if unit == 'h':
-            total_seconds += value * 3600
+            total += v * 3600
         elif unit == 'm':
-            total_seconds += value * 60
-    return total_seconds if total_seconds > 0 else None
+            total += v * 60
+    return total if total > 0 else None
 
 def post_news():
     global current_index, posting_active, post_count, error_count, duplicate_count, last_post_time
     while posting_active:
-        logger.info(f"Начало цикла постинга, posting_active={posting_active}")
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT channel_id FROM channels")
@@ -432,20 +399,16 @@ def post_news():
         conn.close()
 
         if not channels:
-            logger.info("Нет каналов для постинга")
             next_post_event.wait(posting_interval)
-            if not posting_active:
-                break
+            next_post_event.clear()
             continue
 
         rss_url = RSS_URLS[current_index]
-        logger.info(f"Обрабатываем RSS: {rss_url}")
         try:
-            rss_response = requests.get(rss_url, timeout=10)
-            rss_response.raise_for_status()
-            feed = feedparser.parse(rss_response.content)
+            resp = requests.get(rss_url, timeout=10)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
         except requests.RequestException as e:
-            logger.error(f"Ошибка чтения RSS {rss_url}: {e}")
             log_error(f"Ошибка RSS: {e}", rss_url)
             error_count += 1
             current_index = (current_index + 1) % len(RSS_URLS)
@@ -453,55 +416,39 @@ def post_news():
             next_post_event.clear()
             continue
 
-        if not feed.entries:
-            logger.warning(f"Нет записей в {rss_url}")
-            error_count += 1
-        else:
-            latest_entry = feed.entries[0]
-            link = latest_entry.link
-            logger.info(f"Проверяем ссылку: {link}")
+        if feed.entries:
+            entry = feed.entries[0]
+            link = entry.link
             if not check_duplicate(link):
                 title, summary = get_article_content(link)
-                if "Ошибка" in title:
-                    error_count += 1
-                    logger.error(f"Ошибка обработки новости: {title}")
-                    continue
-                message = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
-                logger.info(f"Сформировано сообщение: {message[:50]}...")
-                for (channel_id,) in channels:
-                    if can_post_to_channel(channel_id):
-                        if send_message(channel_id, message, use_html=True):
-                            save_to_feedcache(title, summary, link, rss_url.split('/')[2])
-                            post_count += 1
-                            last_post_time = time.time()
-                            logger.info(f"Новость успешно запощена в {channel_id}")
+                if "Ошибка" not in title:
+                    msg = f"<b>{title}</b> <a href='{link}'>| Источник</a>\n{summary}\n\n<i>Пост сгенерирован ИИ</i>"
+                    for (ch,) in channels:
+                        if can_post_to_channel(ch):
+                            if send_message(ch, msg):
+                                save_to_feedcache(title, summary, link, rss_url.split('/')[2])
+                                post_count += 1
+                                last_post_time = time.time()
+                            else:
+                                error_count += 1
                         else:
                             error_count += 1
-                            logger.error(f"Не удалось запостить в {channel_id}")
-                    else:
-                        error_count += 1
-                        logger.error(f"Нет прав для постинга в {channel_id}")
+                else:
+                    error_count += 1
             else:
                 duplicate_count += 1
-                logger.info(f"Дубль пропущен: {link}, общее число дублей: {duplicate_count}")
 
         current_index = (current_index + 1) % len(RSS_URLS)
-        logger.info(f"Ожидание следующего поста ({posting_interval} сек)")
         next_post_event.wait(posting_interval)
         next_post_event.clear()
-        if not posting_active:
-            break
 
 def start_posting_thread():
     global posting_thread, posting_active, start_time
-    if posting_thread is None or not posting_thread.is_alive():
+    if not posting_thread or not posting_thread.is_alive():
         posting_active = True
         start_time = time.time()
         posting_thread = threading.Thread(target=post_news)
         posting_thread.start()
-        logger.info("Постинг запущен")
-    else:
-        logger.info("Постинг уже активен")
 
 def stop_posting_thread():
     global posting_active, posting_thread
@@ -510,28 +457,26 @@ def stop_posting_thread():
     if posting_thread:
         posting_thread.join()
         posting_thread = None
-    logger.info("Постинг остановлен")
 
 def get_status(username):
     channel_id = get_channel_by_admin(username)
     uptime = timedelta(seconds=int(time.time() - start_time)) if start_time else "Не запущен"
-    next_post = "Не активно"
     if posting_active and last_post_time:
-        time_since_last = time.time() - last_post_time
-        time_to_next = posting_interval - (time_since_last % posting_interval)
-        next_post = f"{int(time_to_next // 60)} мин {int(time_to_next % 60)} сек"
-    interval_str = f"{posting_interval // 3600}h {((posting_interval % 3600) // 60)}m" if posting_interval >= 3600 else f"{posting_interval // 60}m"
+        since = time.time() - last_post_time
+        to_next = posting_interval - (since % posting_interval)
+        next_post = f"{int(to_next//60)} мин {int(to_next%60)} сек"
+    else:
+        next_post = "Не активно"
+    interval_str = f"{posting_interval//3600}h {((posting_interval%3600)//60)}m" if posting_interval >= 3600 else f"{posting_interval//60}m"
     admins = get_admins(channel_id) if channel_id else []
     creator = get_channel_creator(channel_id) if channel_id else "Неизвестен"
     current_rss = RSS_URLS[current_index] if current_index < len(RSS_URLS) else "Нет"
-    prompt = get_prompt()
-    current_model = get_model()
-    feedcache_size = sqlite3.connect(DB_FILE).execute("SELECT COUNT(*) FROM feedcache").fetchone()[0]
+    cache_size = sqlite3.connect(DB_FILE).execute("SELECT COUNT(*) FROM feedcache").fetchone()[0]
     return f"""
 Статус бота:
 Канал: {channel_id}
 Создатель: @{creator}
-Админы: {', '.join([f'@{a}' for a in admins])}
+Админы: {', '.join('@'+a for a in admins)}
 Состояние постинга: {'Активен' if posting_active else 'Остановлен'}
 Текущий интервал: {interval_str}
 Время до следующего поста: {next_post}
@@ -540,15 +485,15 @@ def get_status(username):
 Запощенных постов: {post_count}
 Пропущено дублей: {duplicate_count}
 Ошибок: {error_count}
-Размер кэша: {feedcache_size} записей
+Размер кэша: {cache_size} записей
 Аптайм: {uptime}
-Текущая модель: {current_model}
+Текущая модель: {get_model()}
 Текущий промпт:
-{prompt}
+{get_prompt()}
 """
 
 def get_help():
-    help_text = """
+    return """
 Доступные команды:
 /start - Привязать канал или проверить доступ
 /startposting - Начать постинг
@@ -570,29 +515,20 @@ def get_help():
 /debug - Показать последний сырой ответ LLM
 /help - Это сообщение
 """
-    logger.info(f"Текст помощи перед отправкой: {help_text}")
-    return help_text
 
 @app.route('/ping', methods=['GET'])
 def ping():
-    logger.info("Получен пинг")
     return "OK", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    logger.info("Получен запрос на /webhook")
     update = request.get_json()
-    logger.info(f"Данные запроса: {json.dumps(update, ensure_ascii=False)}")
-
     if not update or 'message' not in update or 'message_id' not in update['message']:
-        logger.error("Некорректный запрос")
         return "OK", 200
 
     chat_id = update['message']['chat']['id']
-    message_text = update['message'].get('text', '')
-    username = update['message']['from'].get('username', None)
-
-    logger.info(f"Получена команда: '{message_text}' от @{username} в чате {chat_id}")
+    text = update['message'].get('text', '')
+    username = update['message']['from'].get('username')
 
     if not username:
         send_message(chat_id, "У вас нет username. Установите его в настройках Telegram.")
@@ -600,21 +536,20 @@ def webhook():
 
     user_channel = get_channel_by_admin(username)
 
-    if message_text == '/start':
+    if text == '/start':
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT channel_id FROM channels")
         channels = c.fetchall()
         conn.close()
-
         if user_channel:
             send_message(chat_id, f"Вы уже админ канала {user_channel}. Используйте /startposting для начала.")
         elif not channels:
             send_message(chat_id, "Укажите ID канала для постинга (например, @channelname или -1001234567890):")
         else:
             send_message(chat_id, "У вас нет прав на управление ботом. Обратитесь к администратору канала.")
-    elif message_text.startswith('@') or message_text.startswith('-100'):
-        channel_id = message_text
+    elif text.startswith('@') or text.startswith('-100'):
+        channel_id = text
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT channel_id FROM channels")
@@ -626,34 +561,34 @@ def webhook():
         else:
             send_message(chat_id, "Бот не имеет прав администратора в этом канале.")
         conn.close()
-    elif message_text == '/startposting':
+    elif text == '/startposting':
         if user_channel:
             start_posting_thread()
             send_message(chat_id, f"Постинг начат в {user_channel}")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/stopposting':
+    elif text == '/stopposting':
         if user_channel:
             stop_posting_thread()
             send_message(chat_id, "Постинг остановлен")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text.startswith('/setinterval'):
+    elif text.startswith('/setinterval'):
         if user_channel:
-            try:
-                interval_str = message_text.split()[1]
-                new_interval = parse_interval(interval_str)
-                if new_interval:
+            parts = text.split()
+            if len(parts) > 1:
+                new_int = parse_interval(parts[1])
+                if new_int:
                     global posting_interval
-                    posting_interval = new_interval
-                    send_message(chat_id, f"Интервал постинга установлен: {interval_str}")
+                    posting_interval = new_int
+                    send_message(chat_id, f"Интервал постинга установлен: {parts[1]}")
                 else:
                     send_message(chat_id, "Неверный формат. Используйте: /setinterval 34m, 1h, 2h 53m")
-            except IndexError:
+            else:
                 send_message(chat_id, "Укажите интервал: /setinterval 34m")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/nextpost':
+    elif text == '/nextpost':
         if user_channel:
             if posting_active:
                 next_post_event.set()
@@ -662,7 +597,7 @@ def webhook():
                 send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/skiprss':
+    elif text == '/skiprss':
         if user_channel:
             if posting_active:
                 global current_index
@@ -672,27 +607,27 @@ def webhook():
                 send_message(chat_id, "Постинг не активен. Сначала используйте /startposting.")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text.startswith('/editprompt'):
+    elif text.startswith('/editprompt'):
         if user_channel:
-            if len(message_text.split()) == 1:
+            if len(text.split()) == 1:
                 send_message(chat_id, "Отправьте новый промпт после команды, например:\n/editprompt Новый промпт здесь")
             else:
-                new_prompt = message_text[len('/editprompt '):].strip()
-                set_prompt(new_prompt)
-                send_message(chat_id, "Промпт обновлён:\n" + new_prompt)
+                new_p = text[len('/editprompt '):].strip()
+                set_prompt(new_p)
+                send_message(chat_id, "Промпт обновлён:\n" + new_p)
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text.startswith('/changellm'):
+    elif text.startswith('/changellm'):
         if user_channel:
-            if len(message_text.split()) == 1:
-                send_message(chat_id, "Укажите модель, например: /changellm gpt-4o-mini\nДоступные модели: см. https://platform.openai.com/docs/models")
+            parts = text.split()
+            if len(parts) > 1:
+                set_model(parts[1])
+                send_message(chat_id, f"Модель изменена на: {parts[1]}")
             else:
-                new_model = message_text.split()[1]
-                set_model(new_model)
-                send_message(chat_id, f"Модель изменена на: {new_model}")
+                send_message(chat_id, "Укажите модель, например: /changellm gpt-4o-mini")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/sqlitebackup':
+    elif text == '/sqlitebackup':
         if user_channel:
             if os.path.exists(DB_FILE):
                 send_file(chat_id, DB_FILE)
@@ -701,89 +636,75 @@ def webhook():
                 send_message(chat_id, "База данных не найдена")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/sqliteupdate':
+    elif text == '/sqliteupdate':
         if user_channel:
             send_message(chat_id, "Отправьте файл базы данных (feedcache.db) в ответ на это сообщение")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif 'reply_to_message' in update['message'] and update['message']['reply_to_message'].get('text', '') == "Отправьте файл базы данных (feedcache.db) в ответ на это сообщение":
-        if user_channel:
-            if 'document' in update['message']:
-                file_id = update['message']['document']['file_id']
-                file_name = update['message']['document']['file_name']
-                if file_name != "feedcache.db":
-                    send_message(chat_id, "Файл должен называться 'feedcache.db'")
-                    return "OK", 200
-                global error_count
-                try:
-                    response = requests.get(
-                        f"{TELEGRAM_URL}getFile",
-                        params={"file_id": file_id},
-                        timeout=10
-                    )
-                    response.raise_for_status()
-                    file_path = response.json()['result']['file_path']
-                    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                    with open(DB_FILE, 'wb') as f:
-                        f.write(requests.get(file_url, timeout=10).content)
-                    send_message(chat_id, "База данных обновлена")
-                except requests.RequestException as e:
-                    logger.error(f"Ошибка загрузки файла: {e}")
-                    log_error(f"Ошибка загрузки файла: {e}", file_id)
-                    error_count += 1
-                    send_message(chat_id, "Не удалось загрузить базу данных")
-                    return "OK", 200
+    elif 'reply_to_message' in update['message'] and update['message']['reply_to_message'].get('text') == "Отправьте файл базы данных (feedcache.db) в ответ на это сообщение":
+        if user_channel and 'document' in update['message']:
+            doc = update['message']['document']
+            if doc.get('file_name') != "feedcache.db":
+                send_message(chat_id, "Файл должен называться 'feedcache.db'")
             else:
-                send_message(chat_id, "Прикрепите файл базы данных")
+                try:
+                    file_id = doc['file_id']
+                    resp = requests.get(f"{TELEGRAM_URL}getFile", params={"file_id": file_id}, timeout=10)
+                    resp.raise_for_status()
+                    file_path = resp.json()['result']['file_path']
+                    data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}", timeout=10).content
+                    with open(DB_FILE, 'wb') as f:
+                        f.write(data)
+                    send_message(chat_id, "База данных обновлена")
+                except Exception as e:
+                    log_error(f"Ошибка загрузки файла: {e}", file_id)
+                    send_message(chat_id, "Не удалось загрузить базу данных")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/info':
+    elif text == '/info':
         if user_channel:
             send_message(chat_id, get_status(username))
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/errinf':
+    elif text == '/errinf':
         if user_channel:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute("SELECT timestamp, message, link FROM errors ORDER BY timestamp DESC LIMIT 10")
-            errors = c.fetchall()
+            errs = c.fetchall()
             conn.close()
-            if not errors:
+            if not errs:
                 send_message(chat_id, "Ошибок пока нет.")
             else:
-                error_list = "\n".join([f"{ts} - {msg} (Ссылка: {link})" for ts, msg, link in errors])
-                send_message(chat_id, f"Последние ошибки:\n{error_list}", use_html=False)
+                lst = "\n".join(f"{t} - {m} (Ссылка: {l})" for t,m,l in errs)
+                send_message(chat_id, f"Последние ошибки:\n{lst}", use_html=False)
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text.startswith('/errnotification'):
+    elif text.startswith('/errnotification'):
         if user_channel:
-            try:
-                state = message_text.split()[1].lower()
-                if state in ['on', 'off']:
-                    set_error_notifications(state)
-                    send_message(chat_id, f"Уведомления об ошибках: {state}")
-                else:
-                    send_message(chat_id, "Используйте: /errnotification on или /errnotification off")
-            except IndexError:
-                send_message(chat_id, "Укажите состояние: /errnotification on или /errnotification off")
+            parts = text.split()
+            if len(parts) > 1 and parts[1].lower() in ('on','off'):
+                set_error_notifications(parts[1].lower())
+                send_message(chat_id, f"Уведомления об ошибках: {parts[1].lower()}")
+            else:
+                send_message(chat_id, "Используйте: /errnotification on или /errnotification off")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/feedcache':
+    elif text == '/feedcache':
         if user_channel:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute("SELECT * FROM feedcache")
+            c.execute("SELECT id, title, summary, link, source, timestamp FROM feedcache")
             rows = c.fetchall()
             conn.close()
             if not rows:
                 send_message(chat_id, "Feedcache пуст")
             else:
-                cache = [dict(zip(["id", "title", "summary", "link", "source", "timestamp"], row)) for row in rows]
+                cache = [dict(zip(["id","title","summary","link","source","timestamp"], r)) for r in rows]
                 send_message(chat_id, "Содержимое feedcache:\n" + json.dumps(cache, ensure_ascii=False, indent=2)[:4096])
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/feedcacheclear':
+    elif text == '/feedcacheclear':
         if user_channel:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
@@ -793,52 +714,50 @@ def webhook():
             send_message(chat_id, "Feedcache очищен")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text.startswith('/addadmin'):
+    elif text.startswith('/addadmin'):
         if user_channel:
-            try:
-                new_admin = message_text.split()[1].lstrip('@')
+            parts = text.split()
+            if len(parts) > 1:
+                new_admin = parts[1].lstrip('@')
                 if add_admin(user_channel, new_admin, username):
                     send_message(chat_id, f"@{new_admin} добавлен как админ канала {user_channel}")
                 else:
                     send_message(chat_id, "Вы не можете добавлять админов или пользователь уже админ.")
-            except IndexError:
+            else:
                 send_message(chat_id, "Укажите username: /addadmin @username")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text.startswith('/removeadmin'):
+    elif text.startswith('/removeadmin'):
         if user_channel:
-            try:
-                admin_to_remove = message_text.split()[1].lstrip('@')
-                if remove_admin(user_channel, admin_to_remove, username):
-                    send_message(chat_id, f"@{admin_to_remove} удалён из админов канала {user_channel}")
+            parts = text.split()
+            if len(parts) > 1:
+                to_rm = parts[1].lstrip('@')
+                if remove_admin(user_channel, to_rm, username):
+                    send_message(chat_id, f"@{to_rm} удалён из админов канала {user_channel}")
                 else:
                     send_message(chat_id, "Нельзя удалить создателя или вы не админ.")
-            except IndexError:
+            else:
                 send_message(chat_id, "Укажите username: /removeadmin @username")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/debug':
+    elif text == '/debug':
         if user_channel:
-            logger.info(f"Debug: Запрос от @{username} для показа последнего ответа LLM")
             if last_llm_response:
-                response_text = (
-                    f"Последний сырой ответ LLM:\n\n"
-                    f"Ссылка: {last_llm_response['link']}\n"
-                    f"Время: {last_llm_response['timestamp']}\n\n"
-                    f"{last_llm_response['response']}"
-                )
-                send_message(chat_id, response_text, use_html=False)
-                logger.info(f"Debug: Последний ответ отправлен в {chat_id}: {last_llm_response['response'][:50]}...")
+                resp = last_llm_response
+                debug_msg = (f"Последний сырой ответ LLM:\n\n"
+                             f"Ссылка: {resp['link']}\n"
+                             f"Время: {resp['timestamp']}\n\n"
+                             f"{resp['response']}")
+                send_message(chat_id, debug_msg, use_html=False)
             else:
-                send_message(chat_id, "Нет сохранённых ответов LLM. Попробуйте позже после обработки новости.")
-                logger.info("Debug: Нет сохранённых ответов LLM")
+                send_message(chat_id, "Нет сохранённых ответов LLM.")
         else:
             send_message(chat_id, "Вы не админ ни одного канала.")
-    elif message_text == '/help':
-        logger.info(f"Команда /help вызвана @{username}")
+    elif text == '/help':
         send_message(chat_id, get_help(), use_html=False)
 
     return "OK", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
