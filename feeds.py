@@ -154,7 +154,8 @@ def get_status(username: str) -> str:
     current_rss = RSS_URLS[current_index] if current_index < len(RSS_URLS) else "Нет"
     prompt = get_prompt()
     current_model = get_model()
-    feedcache_size = sqlite3.connect(DB_FILE).execute("SELECT COUNT(*) FROM feedcache").fetchone()[0]
+    with sqlite3.connect(DB_FILE) as conn:
+        feedcache_size = conn.execute("SELECT COUNT(*) FROM feedcache").fetchone()[0]
     return f"""Статус бота:
 Канал: {channel_id}
 Создатель: @{creator}
