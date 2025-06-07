@@ -119,7 +119,7 @@ def webhook():
         if 'document' in message:
             file_id = message['document']['file_id']
             info_resp = requests.get(
-                f"{tg.TELEGRAM_URL}getFile", params={'file_id': file_id}
+                f"{tg.TELEGRAM_URL}getFile", params={'file_id': file_id}, timeout=10
             )
             if info_resp.status_code != 200:
                 tg.send_message(chat_id, "Ошибка запроса getFile")
@@ -128,7 +128,8 @@ def webhook():
             file_path = info.get('result', {}).get('file_path')
             if file_path:
                 file_resp = requests.get(
-                    f"https://api.telegram.org/file/bot{tg.TELEGRAM_TOKEN}/{file_path}"
+                    f"https://api.telegram.org/file/bot{tg.TELEGRAM_TOKEN}/{file_path}",
+                    timeout=10,
                 )
                 if file_resp.status_code != 200:
                     tg.send_message(chat_id, "Ошибка скачивания файла")
