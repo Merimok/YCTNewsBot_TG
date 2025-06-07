@@ -331,7 +331,7 @@ def add_admin(channel_id, new_admin_username, requester_username):
     conn.close()
     return False
 
-def remove_admin(channel_id, admin_username348, requester_username):
+def remove_admin(channel_id, admin_username, requester_username):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT username FROM admins WHERE channel_id = ? AND username = ?", (channel_id, requester_username))
