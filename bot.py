@@ -11,6 +11,7 @@ import threading
 import time
 import re
 from openai import OpenAI
+import html
 
 app = Flask(__name__)
 
@@ -109,6 +110,8 @@ def send_message(chat_id, text, reply_markup=None, use_html=True):
     if len(text) > 4096:
         text = text[:4093] + "..."
         logger.warning(f"Сообщение обрезано до 4096 символов для chat_id {chat_id}")
+    if use_html:
+        text = html.escape(text)
     payload = {
         "chat_id": chat_id,
         "text": text
@@ -255,7 +258,7 @@ def get_article_content(url, max_attempts=3):
                 logger.warning(f"Заголовок укорочен: {cleaned_title}")
             if is_valid_language(cleaned_title):
                 logger.info(f"Заголовок валиден после очистки: {cleaned_title}")
-                return cleaned_title, summary
+                return html.escape(cleaned_title), html.escape(summary)
             else:
                 logger.warning(f"Недопустимый язык в заголовке после очистки: {cleaned_title}, перегенерация...")
                 log_error(f"Недопустимый язык в заголовке: {cleaned_title}", url)
