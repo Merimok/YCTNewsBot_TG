@@ -531,8 +531,173 @@ def webhook():
 
     user_channel = get_channel_by_admin(username)
 
-    # далее обработки команд точно так же, как в предыдущем файле...
-    # (все команды /start, /startposting, /setinterval, /editprompt и т.д.)
+    if not text.startswith('/'):
+        return "OK", 200
+
+    command, *rest = text.split(maxsplit=1)
+    command = command.lower()
+    arg = rest[0] if rest else ''
+
+    if command == '/start':
+        channel_id = None
+        if message['chat'].get('type') == 'channel':
+            channel_id = str(chat_id)
+        elif arg:
+            channel_id = arg
+
+        if user_channel and not channel_id:
+            send_message(chat_id, f"Канал уже привязан: {user_channel}")
+        elif channel_id:
+            if can_post_to_channel(channel_id):
+                save_channel(channel_id, username)
+                send_message(chat_id, f"Канал {channel_id} привязан к @{username}")
+            else:
+                send_message(chat_id, "Бот не имеет прав администратора в указанном канале")
+        else:
+            send_message(chat_id, "Укажите канал командой /start @channel или отправьте команду из канала")
+
+    elif command == '/startposting':
+        if not user_channel:
+            send_message(chat_id, "Канал не привязан. Используйте /start в канале")
+        elif posting_active:
+            send_message(chat_id, "Постинг уже запущен")
+        else:
+            start_posting_thread()
+            send_message(chat_id, "Постинг запущен")
+
+    elif command == '/stopposting':
+        if posting_active:
+            stop_posting_thread()
+            send_message(chat_id, "Постинг остановлен")
+        else:
+            send_message(chat_id, "Постинг и так не активен")
+
+    elif command == '/setinterval':
+        seconds = parse_interval(arg)
+        if seconds:
+            global posting_interval
+            posting_interval = seconds
+            next_post_event.set()
+            send_message(chat_id, f"Интервал обновлён: {arg}")
+        else:
+            send_message(chat_id, "Неверный формат. Пример: /setinterval 1h 30m")
+
+    elif command == '/nextpost':
+        next_post_event.set()
+        send_message(chat_id, "Следующий пост скоро будет опубликован")
+
+    elif command == '/skiprss':
+        global current_index
+        current_index = (current_index + 1) % len(RSS_URLS)
+        next_post_event.set()
+        send_message(chat_id, "Следующий RSS-источник пропущен")
+
+    elif command == '/changellm':
+        if arg:
+            set_model(arg)
+            send_message(chat_id, f"Модель изменена на {arg}")
+        else:
+            send_message(chat_id, "Укажите модель, например /changellm gpt-4o-mini")
+
+    elif command == '/editprompt':
+        if arg:
+            set_prompt(arg)
+            send_message(chat_id, "Промпт обновлён")
+        else:
+            send_message(chat_id, "Используйте /editprompt <новый промпт>")
+
+    elif command == '/sqlitebackup':
+        send_file(chat_id, DB_FILE)
+
+    elif command == '/sqliteupdate':
+        if 'document' in message:
+            file_id = message['document']['file_id']
+            info = requests.get(f"{TELEGRAM_URL}getFile", params={'file_id': file_id}, timeout=10).json()
+            file_path = info.get('result', {}).get('file_path')
+            if file_path:
+                file_data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}", timeout=10)
+                with open(DB_FILE, 'wb') as f:
+                    f.write(file_data.content)
+                send_message(chat_id, "База обновлена")
+            else:
+                send_message(chat_id, "Не удалось получить файл")
+        else:
+            send_message(chat_id, "Отправьте SQLite файл как документ с подписью /sqliteupdate")
+
+    elif command == '/info':
+        send_message(chat_id, get_status(username))
+
+    elif command == '/errinf':
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT timestamp, message, link FROM errors ORDER BY id DESC LIMIT 5")
+        rows = c.fetchall()
+        conn.close()
+        if rows:
+            msg = '\n\n'.join(f"{t}\n{m}\n{l}" for t, m, l in rows)
+        else:
+            msg = "Ошибок нет"
+        send_message(chat_id, msg, use_html=False)
+
+    elif command == '/errnotification':
+        if arg in ['on', 'off']:
+            set_error_notifications(arg)
+            send_message(chat_id, f"Уведомления об ошибках: {arg}")
+        else:
+            send_message(chat_id, "Использование: /errnotification <on|off>")
+
+    elif command == '/feedcache':
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT title, link FROM feedcache ORDER BY timestamp DESC LIMIT 5")
+        rows = c.fetchall()
+        conn.close()
+        if rows:
+            msg = '\n\n'.join(f"{t}\n{l}" for t, l in rows)
+        else:
+            msg = "Кэш пуст"
+        send_message(chat_id, msg, use_html=False)
+
+    elif command == '/feedcacheclear':
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("DELETE FROM feedcache")
+        conn.commit()
+        conn.close()
+        send_message(chat_id, "Кэш очищен")
+
+    elif command == '/addadmin':
+        if not user_channel:
+            send_message(chat_id, "Канал не привязан")
+        elif arg:
+            if add_admin(user_channel, arg.lstrip('@'), username):
+                send_message(chat_id, f"Админ {arg} добавлен")
+            else:
+                send_message(chat_id, "Не удалось добавить админа")
+        else:
+            send_message(chat_id, "Использование: /addadmin <username>")
+
+    elif command == '/removeadmin':
+        if not user_channel:
+            send_message(chat_id, "Канал не привязан")
+        elif arg:
+            if remove_admin(user_channel, arg.lstrip('@'), username):
+                send_message(chat_id, f"Админ {arg} удалён")
+            else:
+                send_message(chat_id, "Не удалось удалить админа")
+        else:
+            send_message(chat_id, "Использование: /removeadmin <username>")
+
+    elif command == '/debug':
+        if last_llm_response:
+            send_message(chat_id, json.dumps(last_llm_response, ensure_ascii=False), use_html=False)
+        else:
+            send_message(chat_id, "Нет сохранённого ответа LLM")
+
+    elif command == '/help':
+        send_message(chat_id, get_help())
+
+    else:
+        send_message(chat_id, "Неизвестная команда. Используйте /help")
 
     return "OK", 200
 
