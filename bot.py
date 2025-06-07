@@ -118,9 +118,20 @@ def send_message(chat_id, text, reply_markup=None, use_html=True):
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     logger.info(f"Отправка сообщения в {chat_id}: {text[:50]}...")
-    response = requests.post(f"{TELEGRAM_URL}sendMessage", json=payload)
-    if response.status_code != 200:
-        logger.error(f"Ошибка отправки: {response.text}")
+    global error_count
+    try:
+        response = requests.post(
+            f"{TELEGRAM_URL}sendMessage", json=payload, timeout=10
+        )
+        if response.status_code != 200:
+            logger.error(f"Ошибка отправки: {response.text}")
+            log_error(f"Ошибка Telegram: {response.text}", f"{TELEGRAM_URL}sendMessage")
+            error_count += 1
+            return False
+    except requests.RequestException as e:
+        logger.error(f"Ошибка отправки: {e}")
+        log_error(f"Ошибка Telegram: {e}", f"{TELEGRAM_URL}sendMessage")
+        error_count += 1
         return False
     logger.info("Сообщение успешно отправлено")
     return True
@@ -131,10 +142,30 @@ def send_file(chat_id, file_path):
         return False
     with open(file_path, 'rb') as f:
         files = {'document': (os.path.basename(file_path), f)}
-        response = requests.post(f"{TELEGRAM_URL}sendDocument", data={'chat_id': chat_id}, files=files)
-    if response.status_code != 200:
-        logger.error(f"Ошибка отправки файла: {response.text}")
-        return False
+        global error_count
+        try:
+            response = requests.post(
+                f"{TELEGRAM_URL}sendDocument",
+                data={'chat_id': chat_id},
+                files=files,
+                timeout=10
+            )
+            if response.status_code != 200:
+                logger.error(f"Ошибка отправки файла: {response.text}")
+                log_error(
+                    f"Ошибка Telegram: {response.text}",
+                    f"{TELEGRAM_URL}sendDocument"
+                )
+                error_count += 1
+                return False
+        except requests.RequestException as e:
+            logger.error(f"Ошибка отправки файла: {e}")
+            log_error(
+                f"Ошибка Telegram: {e}",
+                f"{TELEGRAM_URL}sendDocument"
+            )
+            error_count += 1
+            return False
     logger.info(f"Файл {file_path} отправлен в {chat_id}")
     return True
 
@@ -356,15 +387,28 @@ def get_admins(channel_id):
     return [row[0] for row in result]
 
 def can_post_to_channel(channel_id):
-    response = requests.get(f"{TELEGRAM_URL}getChatMember", params={
-        "chat_id": channel_id,
-        "user_id": requests.get(f"{TELEGRAM_URL}getMe").json()["result"]["id"]
-    })
-    if response.status_code == 200:
-        status = response.json()["result"]["status"]
-        return status in ["administrator", "creator"]
-    logger.error(f"Ошибка проверки прав для {channel_id}: {response.text}")
-    return False
+    global error_count
+    try:
+        me_resp = requests.get(f"{TELEGRAM_URL}getMe", timeout=10)
+        me_resp.raise_for_status()
+        bot_id = me_resp.json()["result"]["id"]
+        response = requests.get(
+            f"{TELEGRAM_URL}getChatMember",
+            params={"chat_id": channel_id, "user_id": bot_id},
+            timeout=10
+        )
+        if response.status_code == 200:
+            status = response.json()["result"]["status"]
+            return status in ["administrator", "creator"]
+        logger.error(f"Ошибка проверки прав для {channel_id}: {response.text}")
+        log_error(f"Ошибка проверки прав: {response.text}", channel_id)
+        error_count += 1
+        return False
+    except requests.RequestException as e:
+        logger.error(f"Ошибка проверки прав для {channel_id}: {e}")
+        log_error(f"Ошибка проверки прав: {e}", channel_id)
+        error_count += 1
+        return False
 
 def parse_interval(interval_str):
     total_seconds = 0
@@ -396,7 +440,18 @@ def post_news():
 
         rss_url = RSS_URLS[current_index]
         logger.info(f"Обрабатываем RSS: {rss_url}")
-        feed = feedparser.parse(rss_url)
+        try:
+            rss_response = requests.get(rss_url, timeout=10)
+            rss_response.raise_for_status()
+            feed = feedparser.parse(rss_response.content)
+        except requests.RequestException as e:
+            logger.error(f"Ошибка чтения RSS {rss_url}: {e}")
+            log_error(f"Ошибка RSS: {e}", rss_url)
+            error_count += 1
+            current_index = (current_index + 1) % len(RSS_URLS)
+            next_post_event.wait(posting_interval)
+            next_post_event.clear()
+            continue
 
         if not feed.entries:
             logger.warning(f"Нет записей в {rss_url}")
@@ -659,12 +714,25 @@ def webhook():
                 if file_name != "feedcache.db":
                     send_message(chat_id, "Файл должен называться 'feedcache.db'")
                     return "OK", 200
-                response = requests.get(f"{TELEGRAM_URL}getFile?file_id={file_id}")
-                file_path = response.json()['result']['file_path']
-                file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-                with open(DB_FILE, 'wb') as f:
-                    f.write(requests.get(file_url).content)
-                send_message(chat_id, "База данных обновлена")
+                global error_count
+                try:
+                    response = requests.get(
+                        f"{TELEGRAM_URL}getFile",
+                        params={"file_id": file_id},
+                        timeout=10
+                    )
+                    response.raise_for_status()
+                    file_path = response.json()['result']['file_path']
+                    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+                    with open(DB_FILE, 'wb') as f:
+                        f.write(requests.get(file_url, timeout=10).content)
+                    send_message(chat_id, "База данных обновлена")
+                except requests.RequestException as e:
+                    logger.error(f"Ошибка загрузки файла: {e}")
+                    log_error(f"Ошибка загрузки файла: {e}", file_id)
+                    error_count += 1
+                    send_message(chat_id, "Не удалось загрузить базу данных")
+                    return "OK", 200
             else:
                 send_message(chat_id, "Прикрепите файл базы данных")
         else:
